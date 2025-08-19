@@ -1,0 +1,41 @@
+# OS / editors
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+.env
+.env.*
+
+# Data / artifacts
+dataset/*.jsonl
+dataset/
+twitter-archive/
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+
+# Training outputs / caches
+out/
+checkpoints/
+runs/
+.cache/
+.huggingface/
+wandb/
+
+# Logs
+logs/
+*.log
+
+# Jupyter
+.ipynb_checkpoints/
