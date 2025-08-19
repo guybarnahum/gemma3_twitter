@@ -20,7 +20,7 @@ In this repo, training writes a LoRA adapter to `out/gemma3-twitter-lora/` by de
 ## What this tool does
 
 <details>
-<summary><b>Dataset prep (click to expand)</b></summary>
+<summary><b>Dataset preparation from Twitter/X export</b></summary>
 
 **Input:** Twitter/X export (`data/tweets.js`, `data/tweets/*.js`) or raw JSON/JSONL  
 **Output:** Gemma-ready SFT in `dataset/train.jsonl` (+ time-held `dataset/train_eval.jsonl`)
@@ -114,6 +114,8 @@ General form:
 ````
 
 ### Commands
+<details>
+<summary><b>Usage</b></summary>
 
 * **setup**
   Create `.venv/` and install `requirements.txt`.
@@ -204,11 +206,12 @@ PY_BIN=python3.11
 
 > **Note:** `.env` (and `state/`) should be in `.gitignore`. All commands that run Python call the venv **activate** internally; your parent shell remains unchanged.
 
----
+</details>
 
 ## Inference
 
-### Inference with a LoRA adapter
+<details>
+<summary><b>Inference with a LoRA adapter</b></summary>
 
 Run your base Gemma model + your adapter (uses `infer_adapter.py` under the hood).
 
@@ -236,10 +239,9 @@ Then:
 # or
 echo "Write a concise tweet about: AR tracking." | ./run.sh infer
 ```
-
----
-
-### Merge the adapter into standalone weights
+</details>
+<details>
+<summary><b>Merge the adapter into standalone weights</b></summary>
 
 Bake the adapter into a new folder so you can run it **without** PEFT (uses `merge_adapter.py`).
 
@@ -254,10 +256,9 @@ You can set a default in `.env`:
 ```bash
 MERGED_DIR=out/gemma3-merged
 ```
-
----
-
-### Inference with the merged model
+</details>
+<details>
+<summary><b>Inference with the merged model</b></summary>
 
 Run the merged model directly (uses `infer_merged.py`).
 
@@ -282,22 +283,22 @@ MERGED_DIR=out/gemma3-merged
 # or
 echo "Write a concise tweet about: AR occlusion." | ./run.sh infer_merged
 ```
-
----
-
-### Tips & gotchas
+</details>
+<details>
+<summary><b> Tips & gotchas</b></summary>
 
 * **Pick the right folder:** pointing `infer` at the adapter **root** (`out/gemma3-twitter-lora/`) usually gives you the best weights (if you trained with `load_best_model_at_end`). Otherwise, try a specific `checkpoint-XXXX/`.
 * **Memory:** for GPU inference the scripts default to `bfloat16` when available. On CPU, dtype falls back to default float; it’s slower, so prefer smaller Gemma sizes.
 * **Ollama:** Ollama cannot load a Hugging Face **adapter** directly. If you want to run your finetuned weights in Ollama, **merge** first, then follow Ollama’s custom-model guidance.
 
----
+</details>
 
 ## Run a Gemma model locally with Ollama
 
-To use our finetuned model it needs to be merged and converted to **GGUF** and potentially **Quantized**
+To use our finetuned model, it needs to be merged and converted to **GGUF** and potentially **Quantized**
 
-To use an off-the-shelf Gemma 3 build:
+<details>
+<summary><b> To use an off-the-shelf Gemma 3 build</b></summary>
 
 ```bash
 ollama pull gemma3:4b
@@ -312,7 +313,10 @@ ollama run gemma3:4b -p "Write a concise tweet in my signature style about: robo
 
 > Gemma 3 models are available in Ollama 
 
-### Run **your merged fine-tuned** model in Ollama
+</details>
+
+<details>
+<summary><b> Run <i>your merged fine-tuned</i> model in Ollama</b></summary>
 
 Ollama runs models in **GGUF**. For your fine-tune, first merge the LoRA adapter into the base (you already have a command for this), then convert to GGUF, optionally quantize, and create a small Modelfile.
 
@@ -359,3 +363,4 @@ ollama run my-gemma -p "Write a concise tweet in my signature style about: AR tr
 
 > Modelfiles let you import a local GGUF and run it via `ollama create` / `ollama run`. 
 
+</details>
