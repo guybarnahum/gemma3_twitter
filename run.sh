@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# -------- load .env early (so PY_BIN & friends apply) --------
+# -------- load .env early --------
 ENV_FILE="${ENV_FILE:-.env}"
 if [[ -f "$ENV_FILE" ]]; then
+  set -a; # export everything we source
   # shellcheck disable=SC1090
-  set -a
   source "$ENV_FILE"
   set +a
 fi
 
-# --- config (can be overridden via .env) ---
+# --- config (overridable via .env) ---
 VENV_DIR="${VENV_DIR:-.venv}"
 REQ_FILE="${REQ_FILE:-requirements.txt}"
 TRAIN_SCRIPT="${TRAIN_SCRIPT:-train_gemma3.py}"
 DEFAULT_OUT="${DEFAULT_OUT:-dataset/train.jsonl}"
 STATE_FILE="${STATE_FILE:-state/last_sync.json}"
 
-# Prefer Python from .env if set; else try 3.11 → 3
+# Prefer Python from .env; else try 3.11 → 3
 PY_BIN="${PY_BIN:-}"
 if [[ -z "${PY_BIN}" ]]; then
   if command -v python3.11 >/dev/null 2>&1; then
@@ -33,35 +33,22 @@ fi
 usage() {
   cat <<EOF
 Usage:
-  $0 setup                      # create venv and install requirements
-  $0 shell                      # open a subshell with venv activated
-  $0 convert ARCHIVE [OUT]      # run twitter_to_jsonl.py (default OUT=${DEFAULT_OUT})
-  $0 sync [args...]             # run incremental_sync.py (pass args through or use .env)
-  $0 train [args...]            # run ${TRAIN_SCRIPT} (args forwarded)
-  $0 daily                      # sync (from .env) -> train (auto-resume)
-  $0 clean                      # remove venv
+  $0 setup                          # create venv and install requirements
+  $0 shell                          # open a subshell with venv activated
+  $0 convert ARCHIVE [OUT]          # run twitter_to_jsonl.py (default OUT=${DEFAULT_OUT})
+  $0 sync [args...]                 # run incremental_sync.py (pass args through or use .env)
+  $0 train [args...]                # run ${TRAIN_SCRIPT} (args forwarded)
+  $0 daily                          # sync (from .env) -> train (auto-resume)
+  $0 infer [BASE] [ADAPTER] [PROMPT]| read prompt from stdin if omitted
+  $0 merge_adapter [BASE] [ADAPTER] [MERGED_DIR]
+  $0 infer_merged [MERGED_DIR] [PROMPT]| read prompt from stdin if omitted
+  $0 clean                          # remove venv
 
-Examples:
-  $0 setup
-  $0 convert ~/Downloads/twitter-archive ${DEFAULT_OUT}
-  $0 sync --username your_handle --out ${DEFAULT_OUT} --state ${STATE_FILE}
-  $0 train --epochs 1 --resume
-  $0 daily
-
-Notes:
-- Reads environment from .env (override path with ENV_FILE=/path/to/.env).
-- 'daily' uses .env values unless you pass flags to 'sync'.
-
-Relevant .env keys:
-  TWITTER_BEARER_TOKEN   # required for API (or pass --bearer to sync)
-  TWITTER_USERNAME       # your @handle (without '@')
-  EXCLUDE_SOURCES        # optional CSV/space list (e.g. "MyBotApp AnotherApp")
-  INCLUDE_REPLIES=1      # set to include replies
-  NO_QUOTES=1            # set to exclude quote-tweets
-  EPOCHS=1               # training epochs for daily
-  MODEL_NAME             # override model for train_gemma3.py (optional)
-  PY_BIN                 # override Python, e.g. python3.11
-  VENV_DIR, DEFAULT_OUT, STATE_FILE, TRAIN_SCRIPT  # optional overrides
+Defaults (overridable via .env):
+  MODEL_NAME=google/gemma-3-4b-it
+  ADAPTER_DIR=out/gemma3-twitter-lora
+  MERGED_DIR=out/gemma3-merged
+  EPOCHS=1
 EOF
 }
 
@@ -71,11 +58,7 @@ ensure_venv() {
     exit 1
   fi
 }
-
-activate() {
-  # shellcheck disable=SC1091
-  source "${VENV_DIR}/bin/activate"
-}
+activate() { source "${VENV_DIR}/bin/activate"; } # shellcheck disable=SC1091
 
 create_venv() {
   if [[ ! -d "${VENV_DIR}" ]]; then
@@ -86,121 +69,112 @@ create_venv() {
   fi
   activate
   python -m pip install --upgrade pip setuptools wheel
-  if [[ -f "${REQ_FILE}" ]]; then
-    pip install -r "${REQ_FILE}"
-  else
-    echo "requirements.txt not found in $(pwd)" >&2
-    exit 1
-  fi
+  [[ -f "${REQ_FILE}" ]] || { echo "Missing ${REQ_FILE}" >&2; exit 1; }
+  pip install -r "${REQ_FILE}"
   echo "Venv ready. To enter later: source ${VENV_DIR}/bin/activate"
 }
 
-subshell() {
-  ensure_venv
-  activate
-  bash --noprofile --norc
-}
+subshell() { ensure_venv; activate; bash --noprofile --norc; }
 
 find_converter() {
-  if [[ -f "twitter_to_jsonl.py" ]]; then
-    echo "twitter_to_jsonl.py"
-  elif [[ -f "dataset/twitter_to_jsonl.py" ]]; then
-    echo "dataset/twitter_to_jsonl.py"
-  else
-    echo ""
-  fi
+  if [[ -f "twitter_to_jsonl.py" ]]; then echo "twitter_to_jsonl.py"
+  elif [[ -f "dataset/twitter_to_jsonl.py" ]]; then echo "dataset/twitter_to_jsonl.py"
+  else echo ""; fi
 }
 
 convert_archive() {
-  ensure_venv
-  activate
-  local ARCHIVE="${1:-}"
-  local OUT_PATH="${2:-${DEFAULT_OUT}}"
-  if [[ -z "${ARCHIVE}" ]]; then
-    echo "Missing ARCHIVE path." >&2
-    usage; exit 1
-  fi
+  ensure_venv; activate
+  local ARCHIVE="${1:-}"; local OUT_PATH="${2:-${DEFAULT_OUT}}"
+  [[ -n "${ARCHIVE}" ]] || { echo "Missing ARCHIVE path." >&2; usage; exit 1; }
   mkdir -p "$(dirname "${OUT_PATH}")"
-  local CONVERTER
-  CONVERTER="$(find_converter)"
-  if [[ -z "${CONVERTER}" ]]; then
-    echo "Could not find twitter_to_jsonl.py (looked in ./ and ./dataset/)." >&2
-    exit 1
-  fi
+  local CONVERTER; CONVERTER="$(find_converter)"
+  [[ -n "${CONVERTER}" ]] || { echo "twitter_to_jsonl.py not found." >&2; exit 1; }
   echo "Using converter: ${CONVERTER}"
   python "${CONVERTER}" "${ARCHIVE}" --out "${OUT_PATH}"
 }
 
 train() {
-  ensure_venv
-  activate
-  if [[ ! -f "${TRAIN_SCRIPT}" ]]; then
-    echo "Missing ${TRAIN_SCRIPT} in repo root." >&2
-    exit 1
-  fi
-  # Forward any args to the training script (e.g., --epochs, --resume, --model)
+  ensure_venv; activate
+  [[ -f "${TRAIN_SCRIPT}" ]] || { echo "Missing ${TRAIN_SCRIPT}" >&2; exit 1; }
   python "${TRAIN_SCRIPT}" "$@"
 }
 
-sync() {
-  ensure_venv
-  activate
-  if [[ ! -f "incremental_sync.py" ]]; then
-    echo "Missing incremental_sync.py in repo root." >&2
-    exit 1
-  fi
+sync_cmd() {
+  ensure_venv; activate
+  [[ -f "incremental_sync.py" ]] || { echo "Missing incremental_sync.py" >&2; exit 1; }
+  if [[ "$#" -gt 0 ]]; then python incremental_sync.py "$@"; return; fi
 
-  if [[ "$#" -gt 0 ]]; then
-    # Pass-through mode: user supplied explicit flags
-    python incremental_sync.py "$@"
-    return
-  fi
-
-  # Env-driven defaults (.env)
-  : "${TWITTER_USERNAME:?Set TWITTER_USERNAME in .env or pass --username to 'sync'}"
+  : "${TWITTER_USERNAME:?Set TWITTER_USERNAME in .env or pass --username}"
   mkdir -p "$(dirname "${DEFAULT_OUT}")" "$(dirname "${STATE_FILE}")"
-
   args=( --username "${TWITTER_USERNAME}" --out "${DEFAULT_OUT}" --state "${STATE_FILE}" )
-  if [[ -n "${TWITTER_BEARER_TOKEN:-}" ]]; then
-    args+=( --bearer "${TWITTER_BEARER_TOKEN}" )
-  fi
-  if [[ -n "${EXCLUDE_SOURCES:-}" ]]; then
-    args+=( --exclude-sources "${EXCLUDE_SOURCES}" )
-  fi
-  if [[ -n "${INCLUDE_REPLIES:-}" ]]; then
-    args+=( --include-replies )
-  fi
-  if [[ -n "${NO_QUOTES:-}" ]]; then
-    args+=( --no-quotes )
-  fi
-
+  [[ -n "${TWITTER_BEARER_TOKEN:-}" ]] && args+=( --bearer "${TWITTER_BEARER_TOKEN}" )
+  [[ -n "${EXCLUDE_SOURCES:-}" ]]     && args+=( --exclude-sources "${EXCLUDE_SOURCES}" )
+  [[ -n "${INCLUDE_REPLIES:-}" ]]     && args+=( --include-replies )
+  [[ -n "${NO_QUOTES:-}" ]]           && args+=( --no-quotes )
   echo "Running incremental_sync.py ${args[*]/$TWITTER_BEARER_TOKEN/***TOKEN***}"
   python incremental_sync.py "${args[@]}"
 }
 
 daily() {
-  # 1) Sync using .env
-  sync
-  # 2) Train a short pass, auto-resume; allow EPOCHS & MODEL_NAME via .env
+  sync_cmd
   local epochs="${EPOCHS:-1}"
   echo "Starting training (epochs=${epochs})..."
   train --epochs "${epochs}" --resume
 }
 
-clean() {
-  rm -rf "${VENV_DIR}"
-  echo "Removed ${VENV_DIR}"
+infer_adapter_cmd() {
+  ensure_venv; activate
+  [[ -f "infer_adapter.py" ]] || { echo "Missing infer_adapter.py" >&2; exit 1; }
+
+  local BASE="${1:-${MODEL_NAME:-google/gemma-3-4b-it}}"
+  local ADAPTER="${2:-${ADAPTER_DIR:-out/gemma3-twitter-lora}}"
+  local PROMPT="${3:-}"
+  if [[ -z "${PROMPT}" ]]; then
+    if [ -t 0 ]; then PROMPT="Write a concise tweet in my signature style about: robotics, SLAM, AR."
+    else PROMPT="$(cat)"; fi
+  fi
+  python infer_adapter.py --base "${BASE}" --adapter "${ADAPTER}" --prompt "${PROMPT}"
 }
+
+merge_adapter_cmd() {
+  ensure_venv; activate
+  [[ -f "merge_adapter.py" ]] || { echo "Missing merge_adapter.py" >&2; exit 1; }
+
+  local BASE="${1:-${MODEL_NAME:-google/gemma-3-4b-it}}"
+  local ADAPTER="${2:-${ADAPTER_DIR:-out/gemma3-twitter-lora}}"
+  local MERGED="${3:-${MERGED_DIR:-out/gemma3-merged}}"
+  mkdir -p "${MERGED}"
+  python merge_adapter.py --base "${BASE}" --adapter "${ADAPTER}" --out "${MERGED}"
+  echo "Merged model saved to: ${MERGED}"
+}
+
+infer_merged_cmd() {
+  ensure_venv; activate
+  [[ -f "infer_merged.py" ]] || { echo "Missing infer_merged.py" >&2; exit 1; }
+
+  local MERGED="${1:-${MERGED_DIR:-out/gemma3-merged}}"
+  local PROMPT="${2:-}"
+  if [[ -z "${PROMPT}" ]]; then
+    if [ -t 0 ]; then PROMPT="Write a concise tweet in my signature style about: robotics, SLAM, AR."
+    else PROMPT="$(cat)"; fi
+  fi
+  python infer_merged.py --model "${MERGED}" --prompt "${PROMPT}"
+}
+
+clean() { rm -rf "${VENV_DIR}"; echo "Removed ${VENV_DIR}"; }
 
 cmd="${1:-}"
 case "${cmd}" in
-  setup)   shift; create_venv "$@";;
-  shell)   shift; subshell;;
-  convert) shift; convert_archive "$@";;
-  sync)    shift; sync "$@";;
-  train)   shift; train "$@";;
-  daily)   shift; daily "$@";;
-  clean)   shift; clean;;
+  setup)          shift; create_venv "$@";;
+  shell)          shift; subshell;;
+  convert)        shift; convert_archive "$@";;
+  sync)           shift; sync_cmd "$@";;
+  train)          shift; train "$@";;
+  daily)          shift; daily "$@";;
+  infer)          shift; infer_adapter_cmd "$@";;
+  merge_adapter)  shift; merge_adapter_cmd "$@";;
+  infer_merged)   shift; infer_merged_cmd "$@";;
+  clean)          shift; clean;;
   ""|-h|--help|help) usage;;
   *) echo "Unknown command: ${cmd}"; usage; exit 1;;
 esac
