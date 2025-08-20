@@ -4,13 +4,14 @@ set -euo pipefail
 # -------- load .env early --------
 ENV_FILE="${ENV_FILE:-.env}"
 if [[ -f "$ENV_FILE" ]]; then
-  set -a; # export everything we source
+  set -a
   # shellcheck disable=SC1090
   source "$ENV_FILE"
   set +a
 fi
 
 # --- config (overridable via .env) ---
+USAGE_FILE="${USAGE_FILE:-usage.txt}"
 VENV_DIR="${VENV_DIR:-.venv}"
 REQ_FILE="${REQ_FILE:-requirements.txt}"
 TRAIN_SCRIPT="${TRAIN_SCRIPT:-train_gemma3.py}"
@@ -31,26 +32,28 @@ if [[ -z "${PY_BIN}" ]]; then
 fi
 
 usage() {
-  cat <<EOF
-Usage:
-  $0 setup                          # create venv and install requirements
-  $0 shell                          # open a subshell with venv activated
-  $0 convert ARCHIVE [OUT]          # run twitter_to_jsonl.py (default OUT=${DEFAULT_OUT})
-  $0 sync [args...]                 # run incremental_sync.py (pass args through or use .env)
-  $0 train [args...]                # run ${TRAIN_SCRIPT} (args forwarded)
-  $0 daily                          # sync (from .env) -> train (auto-resume)
-  $0 infer [BASE] [ADAPTER] [PROMPT]| read prompt from stdin if omitted
-  $0 merge_adapter [BASE] [ADAPTER] [MERGED_DIR]
-  $0 infer_merged [MERGED_DIR] [PROMPT]| read prompt from stdin if omitted
-  $0 clean                          # remove venv
+  # script name (basename looks nicer than full path; use "$0" if you prefer the full path)
+  local self_base="${0##*/}"
 
-Defaults (overridable via .env):
-  MODEL_NAME=google/gemma-3-4b-it
-  ADAPTER_DIR=out/gemma3-twitter-lora
-  MERGED_DIR=out/gemma3-merged
-  EPOCHS=1
+  if [[ -f "${USAGE_FILE}" ]]; then
+    local txt
+    txt="$(cat "${USAGE_FILE}")"
+    # Expand $0 occurrences from the usage.txt
+    txt="${txt//\$0/${self_base}}"
+    # Expand simple {{PLACEHOLDER}} tokens
+    txt="${txt//\{\{DEFAULT_OUT\}\}/${DEFAULT_OUT}}"
+    txt="${txt//\{\{TRAIN_SCRIPT\}\}/${TRAIN_SCRIPT}}"
+    txt="${txt//\{\{STATE_FILE\}\}/${STATE_FILE}}"
+    printf '%s\n' "$txt"
+  else
+    cat <<EOF
+Usage:
+  ${self_base} setup | shell | convert | sync | docs_sync | train | daily | infer | merge_adapter | infer_merged | clean
+  (Missing ${USAGE_FILE}. Create one to see full help.)
 EOF
+  fi
 }
+
 
 ensure_venv() {
   if [[ ! -d "${VENV_DIR}" ]]; then
@@ -115,6 +118,31 @@ sync_cmd() {
   python incremental_sync.py "${args[@]}"
 }
 
+docs_sync_cmd() {
+  ensure_venv; activate
+  [[ -f "incremental_docs_sync.py" ]] || { echo "Missing incremental_docs_sync.py" >&2; exit 1; }
+
+  if [[ "$#" -gt 0 ]]; then
+    python incremental_docs_sync.py "$@"
+    return
+  fi
+
+  : "${DOCS_PATH:?Set DOCS_PATH in .env or pass --path}"
+  local OUT_PATH="${DOCS_OUT:-${DEFAULT_OUT}}"
+  local STATE_PATH="${DOCS_STATE_FILE:-state/docs_sync.json}"
+  local MODE="${DOCS_MODE:-style}"
+
+  args=( --path "${DOCS_PATH}" --out "${OUT_PATH}" --state "${STATE_PATH}" --mode "${MODE}" )
+  [[ -n "${DOCS_LANG_HINT:-}" ]]     && args+=( --lang_hint "${DOCS_LANG_HINT}" )
+  [[ -n "${DOCS_MIN_CHARS:-}" ]]     && args+=( --min_chars "${DOCS_MIN_CHARS}" )
+  [[ -n "${DOCS_MAX_CHARS:-}" ]]     && args+=( --max_chars "${DOCS_MAX_CHARS}" )
+  [[ -n "${DOCS_DEDUP_DATASET:-}" ]] && args+=( --dedup-dataset )
+  [[ -n "${DOCS_DELETE_MISSING:-}" ]]&& args+=( --delete-missing )
+
+  echo "Running incremental_docs_sync.py ${args[*]}"
+  python incremental_docs_sync.py "${args[@]}"
+}
+
 daily() {
   sync_cmd
   local epochs="${EPOCHS:-1}"
@@ -169,6 +197,7 @@ case "${cmd}" in
   shell)          shift; subshell;;
   convert)        shift; convert_archive "$@";;
   sync)           shift; sync_cmd "$@";;
+  docs_sync)      shift; docs_sync_cmd "$@";;
   train)          shift; train "$@";;
   daily)          shift; daily "$@";;
   infer)          shift; infer_adapter_cmd "$@";;

@@ -1,0 +1,52 @@
+Usage:
+  $0 setup                          # create venv and install requirements
+  $0 shell                          # open a subshell with venv activated
+  $0 convert ARCHIVE [OUT]          # run twitter_to_jsonl.py (default OUT={{DEFAULT_OUT}})
+  $0 sync [args...]                 # run incremental_sync.py (pass args through or use .env)
+  $0 docs_sync [--path PATH] [--out OUT] [--state STATE]
+           [--mode style|qa_heading]
+           [--min_chars N] [--max_chars N]
+           [--lang_hint "TEXT"]
+           [--dedup-dataset] [--delete-missing]
+  $0 train [args...]                # run {{TRAIN_SCRIPT}} (args forwarded)
+  $0 daily                          # sync (from .env) -> train (auto-resume)
+  $0 infer [BASE] [ADAPTER] [PROMPT]        # read prompt from stdin if omitted
+  $0 merge_adapter [BASE] [ADAPTER] [MERGED_DIR]
+  $0 infer_merged [MERGED_DIR] [PROMPT]     # read prompt from stdin if omitted
+  $0 clean                          # remove venv
+
+Examples:
+  $0 setup
+  $0 convert ~/Downloads/twitter-archive {{DEFAULT_OUT}}
+  $0 sync --username your_handle --out {{DEFAULT_OUT}} --state {{STATE_FILE}}
+  $0 docs_sync --path docs/ --out {{DEFAULT_OUT}} --state state/docs_sync.json --mode style --dedup-dataset
+  $0 train --epochs 1 --resume
+  $0 daily
+  echo "Write a concise tweet about: SLAM vs LiDAR." | $0 infer
+  $0 merge_adapter "" "" out/gemma3-merged
+
+Defaults (overridable via .env):
+  MODEL_NAME=google/gemma-3-4b-it
+  ADAPTER_DIR=out/gemma3-twitter-lora
+  MERGED_DIR=out/gemma3-merged
+  EPOCHS=1
+
+Env (.env) keys (optional unless noted):
+  TWITTER_BEARER_TOKEN   # required for 'sync' unless passed via --bearer
+  TWITTER_USERNAME       # your handle without '@' (for 'sync' / 'daily')
+  EXCLUDE_SOURCES        # e.g. "MyBotApp AnotherApp"
+  INCLUDE_REPLIES=1      # include replies during 'sync'
+  NO_QUOTES=1            # exclude quote-tweets during 'sync'
+  PY_BIN                 # python executable (e.g., python3.11)
+  VENV_DIR, DEFAULT_OUT, STATE_FILE, TRAIN_SCRIPT
+
+  # Docs ingest defaults for 'docs_sync':
+  DOCS_PATH=docs/
+  DOCS_STATE_FILE=state/docs_sync.json
+  DOCS_MODE=style                # or qa_heading
+  DOCS_LANG_HINT="..."           # optional style/language hint
+  DOCS_MIN_CHARS=80
+  DOCS_MAX_CHARS=1200
+  DOCS_DEDUP_DATASET=1           # also dedup against existing OUT
+  DOCS_DELETE_MISSING=1          # prune state entries for deleted files
+
