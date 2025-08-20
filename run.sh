@@ -31,16 +31,23 @@ if [[ -z "${PY_BIN}" ]]; then
   fi
 fi
 
-usage() {
-  # script name (basename looks nicer than full path; use "$0" if you prefer the full path)
-  local self_base="${0##*/}"
+# Use the venv's interpreter explicitly (works whether it's python or python3)
+venv_py() {
+  if [[ -x "${VENV_DIR}/bin/python" ]]; then
+    printf '%s' "${VENV_DIR}/bin/python"
+  elif [[ -x "${VENV_DIR}/bin/python3" ]]; then
+    printf '%s' "${VENV_DIR}/bin/python3"
+  else
+    return 1
+  fi
+}
 
+usage() {
+  local self_base="${0##*/}"
   if [[ -f "${USAGE_FILE}" ]]; then
     local txt
     txt="$(cat "${USAGE_FILE}")"
-    # Expand $0 occurrences from the usage.txt
     txt="${txt//\$0/${self_base}}"
-    # Expand simple {{PLACEHOLDER}} tokens
     txt="${txt//\{\{DEFAULT_OUT\}\}/${DEFAULT_OUT}}"
     txt="${txt//\{\{TRAIN_SCRIPT\}\}/${TRAIN_SCRIPT}}"
     txt="${txt//\{\{STATE_FILE\}\}/${STATE_FILE}}"
@@ -54,14 +61,16 @@ EOF
   fi
 }
 
-
 ensure_venv() {
   if [[ ! -d "${VENV_DIR}" ]]; then
     echo "No venv found at ${VENV_DIR}. Run: $0 setup" >&2
     exit 1
   fi
 }
-activate() { source "${VENV_DIR}/bin/activate"; } # shellcheck disable=SC1091
+
+activate() { # shellcheck disable=SC1091
+  source "${VENV_DIR}/bin/activate"
+}
 
 create_venv() {
   if [[ ! -d "${VENV_DIR}" ]]; then
@@ -71,41 +80,57 @@ create_venv() {
     echo "Venv already exists at ${VENV_DIR}"
   fi
   activate
-  python -m pip install --upgrade pip setuptools wheel
+  VPY="$(venv_py)" || { echo "No python in ${VENV_DIR}/bin"; exit 1; }
+  "${VPY}" -m pip install --upgrade pip setuptools wheel
   [[ -f "${REQ_FILE}" ]] || { echo "Missing ${REQ_FILE}" >&2; exit 1; }
-  pip install -r "${REQ_FILE}"
+  "${VPY}" -m pip install -r "${REQ_FILE}"
   echo "Venv ready. To enter later: source ${VENV_DIR}/bin/activate"
 }
 
-subshell() { ensure_venv; activate; bash --noprofile --norc; }
+subshell() {
+  ensure_venv; activate
+  bash --noprofile --norc
+}
 
 find_converter() {
-  if [[ -f "twitter_to_jsonl.py" ]]; then echo "twitter_to_jsonl.py"
-  elif [[ -f "dataset/twitter_to_jsonl.py" ]]; then echo "dataset/twitter_to_jsonl.py"
-  else echo ""; fi
+  if [[ -f "twitter_to_jsonl.py" ]]; then
+    echo "twitter_to_jsonl.py"
+  elif [[ -f "dataset/twitter_to_jsonl.py" ]]; then
+    echo "dataset/twitter_to_jsonl.py"
+  else
+    echo ""
+  fi
 }
 
 convert_archive() {
   ensure_venv; activate
-  local ARCHIVE="${1:-}"; local OUT_PATH="${2:-${DEFAULT_OUT}}"
+  local ARCHIVE="${1:-}"
+  local OUT_PATH="${2:-${DEFAULT_OUT}}"
   [[ -n "${ARCHIVE}" ]] || { echo "Missing ARCHIVE path." >&2; usage; exit 1; }
   mkdir -p "$(dirname "${OUT_PATH}")"
   local CONVERTER; CONVERTER="$(find_converter)"
   [[ -n "${CONVERTER}" ]] || { echo "twitter_to_jsonl.py not found." >&2; exit 1; }
   echo "Using converter: ${CONVERTER}"
-  python "${CONVERTER}" "${ARCHIVE}" --out "${OUT_PATH}"
+  VPY="$(venv_py)" || { echo "No python in venv"; exit 1; }
+  "${VPY}" "${CONVERTER}" "${ARCHIVE}" --out "${OUT_PATH}"
 }
 
 train() {
   ensure_venv; activate
   [[ -f "${TRAIN_SCRIPT}" ]] || { echo "Missing ${TRAIN_SCRIPT}" >&2; exit 1; }
-  python "${TRAIN_SCRIPT}" "$@"
+  VPY="$(venv_py)" || { echo "No python in venv"; exit 1; }
+  "${VPY}" "${TRAIN_SCRIPT}" "$@"
 }
 
 sync_cmd() {
   ensure_venv; activate
   [[ -f "incremental_sync.py" ]] || { echo "Missing incremental_sync.py" >&2; exit 1; }
-  if [[ "$#" -gt 0 ]]; then python incremental_sync.py "$@"; return; fi
+  VPY="$(venv_py)" || { echo "No python in venv"; exit 1; }
+
+  if [[ "$#" -gt 0 ]]; then
+    "${VPY}" incremental_sync.py "$@"
+    return
+  fi
 
   : "${TWITTER_USERNAME:?Set TWITTER_USERNAME in .env or pass --username}"
   mkdir -p "$(dirname "${DEFAULT_OUT}")" "$(dirname "${STATE_FILE}")"
@@ -114,16 +139,18 @@ sync_cmd() {
   [[ -n "${EXCLUDE_SOURCES:-}" ]]     && args+=( --exclude-sources "${EXCLUDE_SOURCES}" )
   [[ -n "${INCLUDE_REPLIES:-}" ]]     && args+=( --include-replies )
   [[ -n "${NO_QUOTES:-}" ]]           && args+=( --no-quotes )
-  echo "Running incremental_sync.py ${args[*]/$TWITTER_BEARER_TOKEN/***TOKEN***}"
-  python incremental_sync.py "${args[@]}"
+
+  echo "Running incremental_sync.py …"
+  "${VPY}" incremental_sync.py "${args[@]}"
 }
 
 docs_sync_cmd() {
   ensure_venv; activate
   [[ -f "incremental_docs_sync.py" ]] || { echo "Missing incremental_docs_sync.py" >&2; exit 1; }
+  VPY="$(venv_py)" || { echo "No python in venv"; exit 1; }
 
   if [[ "$#" -gt 0 ]]; then
-    python incremental_docs_sync.py "$@"
+    "${VPY}" incremental_docs_sync.py "$@"
     return
   fi
 
@@ -139,8 +166,8 @@ docs_sync_cmd() {
   [[ -n "${DOCS_DEDUP_DATASET:-}" ]] && args+=( --dedup-dataset )
   [[ -n "${DOCS_DELETE_MISSING:-}" ]]&& args+=( --delete-missing )
 
-  echo "Running incremental_docs_sync.py ${args[*]}"
-  python incremental_docs_sync.py "${args[@]}"
+  echo "Running incremental_docs_sync.py …"
+  "${VPY}" incremental_docs_sync.py "${args[@]}"
 }
 
 daily() {
@@ -153,6 +180,7 @@ daily() {
 infer_adapter_cmd() {
   ensure_venv; activate
   [[ -f "infer_adapter.py" ]] || { echo "Missing infer_adapter.py" >&2; exit 1; }
+  VPY="$(venv_py)" || { echo "No python in venv"; exit 1; }
 
   local BASE="${1:-${MODEL_NAME:-google/gemma-3-4b-it}}"
   local ADAPTER="${2:-${ADAPTER_DIR:-out/gemma3-twitter-lora}}"
@@ -161,24 +189,26 @@ infer_adapter_cmd() {
     if [ -t 0 ]; then PROMPT="Write a concise tweet in my signature style about: robotics, SLAM, AR."
     else PROMPT="$(cat)"; fi
   fi
-  python infer_adapter.py --base "${BASE}" --adapter "${ADAPTER}" --prompt "${PROMPT}"
+  "${VPY}" infer_adapter.py --base "${BASE}" --adapter "${ADAPTER}" --prompt "${PROMPT}"
 }
 
 merge_adapter_cmd() {
   ensure_venv; activate
   [[ -f "merge_adapter.py" ]] || { echo "Missing merge_adapter.py" >&2; exit 1; }
+  VPY="$(venv_py)" || { echo "No python in venv"; exit 1; }
 
   local BASE="${1:-${MODEL_NAME:-google/gemma-3-4b-it}}"
   local ADAPTER="${2:-${ADAPTER_DIR:-out/gemma3-twitter-lora}}"
   local MERGED="${3:-${MERGED_DIR:-out/gemma3-merged}}"
   mkdir -p "${MERGED}"
-  python merge_adapter.py --base "${BASE}" --adapter "${ADAPTER}" --out "${MERGED}"
+  "${VPY}" merge_adapter.py --base "${BASE}" --adapter "${ADAPTER}" --out "${MERGED}"
   echo "Merged model saved to: ${MERGED}"
 }
 
 infer_merged_cmd() {
   ensure_venv; activate
   [[ -f "infer_merged.py" ]] || { echo "Missing infer_merged.py" >&2; exit 1; }
+  VPY="$(venv_py)" || { echo "No python in venv"; exit 1; }
 
   local MERGED="${1:-${MERGED_DIR:-out/gemma3-merged}}"
   local PROMPT="${2:-}"
@@ -186,10 +216,13 @@ infer_merged_cmd() {
     if [ -t 0 ]; then PROMPT="Write a concise tweet in my signature style about: robotics, SLAM, AR."
     else PROMPT="$(cat)"; fi
   fi
-  python infer_merged.py --model "${MERGED}" --prompt "${PROMPT}"
+  "${VPY}" infer_merged.py --model "${MERGED}" --prompt "${PROMPT}"
 }
 
-clean() { rm -rf "${VENV_DIR}"; echo "Removed ${VENV_DIR}"; }
+clean() {
+  rm -rf "${VENV_DIR}"
+  echo "Removed ${VENV_DIR}"
+}
 
 cmd="${1:-}"
 case "${cmd}" in
