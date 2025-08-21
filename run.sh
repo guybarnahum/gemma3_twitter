@@ -86,7 +86,13 @@ create_venv() {
   "${VPY}" -m pip install --upgrade pip setuptools wheel
 
   # ---- Install Torch first (platform-aware), no embedded Python ----
-  TORCH_VER="${TORCH_VER:-2.3.1}"
+  if [[ -z "${TORCH_VER:-}" ]]; then
+    case "$(uname -s)-$(uname -m)" in
+      Darwin-x86_64) TORCH_VER=2.2.2 ;;  # macOS Intel needs <=2.2.x
+      *)             TORCH_VER=2.3.1 ;;
+    esac
+  fi
+
   FORCE_CPU="${FORCE_CPU:-}"
   if [[ -z "${FORCE_CPU}" ]] && command -v nvidia-smi >/dev/null 2>&1; then
     # GPU Linux → CUDA 12.1 wheels
