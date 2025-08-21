@@ -70,19 +70,49 @@ ensure_venv() {
 activate() { source "${VENV_DIR}/bin/activate"; } # shellcheck disable=SC1091
 
 create_venv() {
+  # Create or reuse venv
   if [[ ! -d "${VENV_DIR}" ]]; then
     echo "Creating venv at ${VENV_DIR} with ${PY_BIN}..."
     "${PY_BIN}" -m venv "${VENV_DIR}"
   else
     echo "Venv already exists at ${VENV_DIR}"
   fi
+
+  # Activate and locate interpreter
   activate
   VPY="$(venv_py)" || { echo "No python in ${VENV_DIR}/bin"; exit 1; }
+
+  # Core tools first
   "${VPY}" -m pip install --upgrade pip setuptools wheel
+
+  # ---- Install Torch first (platform-aware), no embedded Python ----
+  TORCH_VER="${TORCH_VER:-2.3.1}"
+  FORCE_CPU="${FORCE_CPU:-}"
+  if [[ -z "${FORCE_CPU}" ]] && command -v nvidia-smi >/dev/null 2>&1; then
+    # GPU Linux → CUDA 12.1 wheels
+    TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu121}"
+    echo "[setup] Installing torch==${TORCH_VER} from ${TORCH_INDEX_URL}"
+    "${VPY}" -m pip install --index-url "${TORCH_INDEX_URL}" "torch==${TORCH_VER}"
+  else
+    # CPU/macOS
+    echo "[setup] Installing torch==${TORCH_VER} (CPU/macOS wheel)"
+    "${VPY}" -m pip install "torch==${TORCH_VER}"
+  fi
+
+  # ---- Then the pinned HF stack from requirements.txt ----
   [[ -f "${REQ_FILE}" ]] || { echo "Missing ${REQ_FILE}" >&2; exit 1; }
-  "${VPY}" -m pip install -r "${REQ_FILE}"
+  "${VPY}" -m pip install --upgrade --upgrade-strategy eager -r "${REQ_FILE}"
+
+  # ---- Print versions without running inline Python ----
+  echo "[setup] Versions:"
+  for pkg in torch transformers trl accelerate peft datasets huggingface_hub; do
+    ver="$("${VPY}" -m pip show "$pkg" 2>/dev/null | awk -F': ' '/^Version:/{print $2; exit}')"
+    printf '  - %s %s\n' "$pkg" "${ver:-(not installed)}"
+  done
+
   echo "Venv ready. To enter later: source ${VENV_DIR}/bin/activate"
 }
+
 
 subshell() { ensure_venv; activate; bash --noprofile --norc; }
 
