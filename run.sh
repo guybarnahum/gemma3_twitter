@@ -89,7 +89,7 @@ create_venv() {
   if [[ -z "${TORCH_VER:-}" ]]; then
     case "$(uname -s)-$(uname -m)" in
       Darwin-x86_64) TORCH_VER=2.2.2 ;;  # macOS Intel needs <=2.2.x
-      *)             TORCH_VER=2.3.1 ;;
+      *)             TORCH_VER=2.4.1 ;;
     esac
   fi
 
