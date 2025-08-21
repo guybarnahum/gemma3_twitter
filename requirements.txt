@@ -3,13 +3,14 @@ numpy<2
 pyarrow>=14,<17
 protobuf<5
 
-# --- Hugging Face stack (compatible set) ---
-transformers==4.46.2
-huggingface_hub==0.24.6
-datasets==2.19.1
-accelerate==0.33.0
-peft==0.13.0
-trl==0.9.6
+# --- HF stack (Gemma-3 needs Transformers ≥ 4.53) ---
+torch>=2.2,<2.4
+transformers>=4.53.0,<5
+huggingface_hub>=0.24.0
+datasets>=2.18,<3.0
+accelerate>=0.33.0
+peft>=0.13.0
+trl>=0.9.6
 
 # --- Tokenization / utils ---
 sentencepiece
