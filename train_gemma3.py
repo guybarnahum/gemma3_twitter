@@ -56,6 +56,8 @@ def parse_args():
     # Precision / device
     ap.add_argument("--device", choices=["auto", "cpu", "mps", "cuda"], default="auto")
     ap.add_argument("--fp16", action="store_true", help="Use fp16 on CUDA")
+    ap.add_argument("--attn_impl", choices=["eager", "sdpa"], default=None,
+                    help="Attention implementation. For Gemma3, 'eager' is recommended.")
 
     # LoRA
     ap.add_argument("--lora_r", type=int, default=16)
@@ -131,6 +133,15 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    # after you compute `token`
+    attn_impl = args.attn_impl
+    try:
+        cfg = AutoConfig.from_pretrained(args.model_name, token=token, trust_remote_code=True)
+        if attn_impl is None and getattr(cfg, "model_type", "") in ("gemma3", "gemma3_text"):
+            attn_impl = "eager"
+    except Exception:
+        pass
+
     # Datasets → text
     train_ds = ensure_text_column(jsonl_to_dataset(args.data), tokenizer)
     eval_ds = None
@@ -146,6 +157,7 @@ def main():
         low_cpu_mem_usage=True,
         trust_remote_code=True,
         token=token,
+        attn_implementation=attn_impl
     )
 
     # LoRA
