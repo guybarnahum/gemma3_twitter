@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
-import argparse, os, torch
-from transformers import AutoTokenizer, Gemma3ForConditionalGeneration
+import argparse, os, sys, threading, torch
+from transformers import (
+    AutoTokenizer,
+    Gemma3ForConditionalGeneration,
+    TextIteratorStreamer,
+)
 
 def parse():
     ap = argparse.ArgumentParser()
@@ -28,14 +32,19 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.bfloat16 if device == "cuda" else torch.float32
 
-    tok = AutoTokenizer.from_pretrained(args.base, use_fast=True, **_hf_kwargs(hf_token))
+    tok = AutoTokenizer.from_pretrained(
+        args.base, use_fast=True, **_hf_kwargs(hf_token)
+    )
+    # Ensure we have a pad token to avoid warnings
+    if tok.pad_token_id is None and tok.eos_token_id is not None:
+        tok.pad_token_id = tok.eos_token_id
 
-    # IMPORTANT: no device_map="auto" (avoids meta/offload), just load then .to(device)
+    # IMPORTANT: avoid device_map="auto" to prevent meta/offload path issues with PEFT
     base = Gemma3ForConditionalGeneration.from_pretrained(
         args.base,
         torch_dtype=dtype,
-        attn_implementation="sdpa",   # optional, faster on modern PyTorch
-        **_hf_kwargs(hf_token)
+        attn_implementation="sdpa",  # faster on recent PyTorch/CUDA; harmless on CPU
+        **_hf_kwargs(hf_token),
     ).to(device)
 
     from peft import PeftModel
@@ -43,17 +52,49 @@ def main():
     model = model.to(device)
     model.eval()
 
-    messages = [{"role":"user","content": args.prompt}]
+    # Chat template → prompt ids
+    messages = [{"role": "user", "content": args.prompt}]
     text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     ids = tok(text, return_tensors="pt").to(device)
 
-    out = model.generate(
+    # Streamer for live tokens
+    streamer = TextIteratorStreamer(
+        tok,
+        skip_prompt=True,
+        skip_special_tokens=True,
+    )
+
+    gen_kwargs = dict(
         **ids,
         max_new_tokens=args.max_new_tokens,
-        do_sample=True, temperature=args.temperature, top_p=args.top_p,
-        pad_token_id=tok.eos_token_id,
+        do_sample=True,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        pad_token_id=tok.pad_token_id,
+        streamer=streamer,
     )
-    print(tok.decode(out[0], skip_special_tokens=True))
+
+    # Run generation in a background thread; print pieces as they arrive
+    def _generate():
+        try:
+            model.generate(**gen_kwargs)
+        except KeyboardInterrupt:
+            pass
+
+    thread = threading.Thread(target=_generate, daemon=True)
+    thread.start()
+
+    try:
+        for piece in streamer:
+            # Print as tokens stream in; flush for immediate display
+            print(piece, end="", flush=True)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        thread.join()
+        # Ensure trailing newline for clean shell prompt
+        if sys.stdout and getattr(sys.stdout, "isatty", lambda: False)():
+            print()
 
 if __name__ == "__main__":
     main()
