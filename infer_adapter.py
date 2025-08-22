@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-import argparse, torch
+import argparse, os, torch
 from transformers import AutoTokenizer, Gemma3ForConditionalGeneration
-from peft import PeftModel
 
 def parse():
     ap = argparse.ArgumentParser()
@@ -13,13 +12,33 @@ def parse():
     ap.add_argument("--top_p", type=float, default=0.95)
     return ap.parse_args()
 
+def _hf_kwargs(token: str):
+    # Transformers >=4.41: 'token'; older: 'use_auth_token'
+    if not token:
+        return {}
+    try:
+        return {"token": token}
+    except TypeError:
+        return {"use_auth_token": token}
+
 def main():
     args = parse()
-    tok = AutoTokenizer.from_pretrained(args.base, use_fast=True)
-    dtype = torch.bfloat16 if torch.cuda.is_available() else None
-    base = Gemma3ForConditionalGeneration.from_pretrained(
-        args.base, device_map="auto", torch_dtype=dtype
+    hf_token = (
+        os.environ.get("HUGGINGFACE_HUB_TOKEN")
+        or os.environ.get("HF_TOKEN")
+        or ""
     )
+
+    dtype = torch.bfloat16 if torch.cuda.is_available() else None
+
+    tok = AutoTokenizer.from_pretrained(
+        args.base, use_fast=True, **_hf_kwargs(hf_token)
+    )
+    base = Gemma3ForConditionalGeneration.from_pretrained(
+        args.base, device_map="auto", torch_dtype=dtype, **_hf_kwargs(hf_token)
+    )
+
+    from peft import PeftModel
     model = PeftModel.from_pretrained(base, args.adapter)
 
     messages = [{"role":"user","content": args.prompt}]
@@ -32,10 +51,9 @@ def main():
         do_sample=True,
         temperature=args.temperature,
         top_p=args.top_p,
-        pad_token_id=tok.eos_token_id
+        pad_token_id=tok.eos_token_id,
     )
     print(tok.decode(out[0], skip_special_tokens=True))
 
 if __name__ == "__main__":
     main()
-
