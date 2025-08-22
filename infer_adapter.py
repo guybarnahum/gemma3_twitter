@@ -13,44 +13,44 @@ def parse():
     return ap.parse_args()
 
 def _hf_kwargs(token: str):
-    # Transformers >=4.41: 'token'; older: 'use_auth_token'
-    if not token:
-        return {}
+    # Works across transformers versions
     try:
-        return {"token": token}
+        return {"token": token} if token else {}
     except TypeError:
-        return {"use_auth_token": token}
+        return {"use_auth_token": token} if token else {}
 
 def main():
     args = parse()
-    hf_token = (
-        os.environ.get("HUGGINGFACE_HUB_TOKEN")
-        or os.environ.get("HF_TOKEN")
-        or ""
-    )
 
-    dtype = torch.bfloat16 if torch.cuda.is_available() else None
+    # Pull HF token from env if present (headless friendly)
+    hf_token = os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HF_TOKEN") or ""
 
-    tok = AutoTokenizer.from_pretrained(
-        args.base, use_fast=True, **_hf_kwargs(hf_token)
-    )
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype = torch.bfloat16 if device == "cuda" else torch.float32
+
+    tok = AutoTokenizer.from_pretrained(args.base, use_fast=True, **_hf_kwargs(hf_token))
+
+    # IMPORTANT: no device_map="auto" (avoids meta/offload), just load then .to(device)
     base = Gemma3ForConditionalGeneration.from_pretrained(
-        args.base, device_map="auto", torch_dtype=dtype, **_hf_kwargs(hf_token)
-    )
+        args.base,
+        torch_dtype=dtype,
+        attn_implementation="sdpa",   # optional, faster on modern PyTorch
+        **_hf_kwargs(hf_token)
+    ).to(device)
 
     from peft import PeftModel
-    model = PeftModel.from_pretrained(base, args.adapter)
+    model = PeftModel.from_pretrained(base, args.adapter, is_trainable=False)
+    model = model.to(device)
+    model.eval()
 
     messages = [{"role":"user","content": args.prompt}]
     text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    ids = tok(text, return_tensors="pt").to(model.device)
+    ids = tok(text, return_tensors="pt").to(device)
 
     out = model.generate(
         **ids,
         max_new_tokens=args.max_new_tokens,
-        do_sample=True,
-        temperature=args.temperature,
-        top_p=args.top_p,
+        do_sample=True, temperature=args.temperature, top_p=args.top_p,
         pad_token_id=tok.eos_token_id,
     )
     print(tok.decode(out[0], skip_special_tokens=True))
