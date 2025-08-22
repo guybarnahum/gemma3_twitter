@@ -21,8 +21,11 @@ def parse():
     ap.add_argument("--adapter", required=True, help='Path to LoRA, or "none" to use base only')
     ap.add_argument("--prompt", required=True)
     ap.add_argument("--system", default=None, help="Optional system message to steer style/length")
-    ap.add_argument("--max_new_tokens", type=int, default=120)
+
+    # IMPORTANT: default None → "no limit" behavior (auto up to context window)
+    ap.add_argument("--max_new_tokens", type=int, default=None)
     ap.add_argument("--min_new_tokens", type=int, default=0)
+
     ap.add_argument("--temperature", type=float, default=0.8)
     ap.add_argument("--top_p", type=float, default=0.95)
     ap.add_argument("--repetition_penalty", type=float, default=1.0)
@@ -30,7 +33,7 @@ def parse():
     ap.add_argument("--device", choices=["auto","cuda","cpu"], default="auto")
     ap.add_argument("--load_in_4bit", action="store_true", help="(GPU only) use bitsandbytes 4-bit")
     ap.add_argument("--attn", choices=["sdpa","eager","flash2"], default="sdpa")
-    ap.add_argument("--no_eos", action="store_true", help="Ignore EOS/EOT; run until min/max tokens")
+    ap.add_argument("--no_eos", action="store_true", help="Ignore EOS/EOT; run until min/max/context")
     return ap.parse_args()
 
 def _hf_kwargs(token: str):
@@ -46,6 +49,15 @@ def _select_device(opt: str):
     if opt == "cuda": return "cuda" if torch.cuda.is_available() else "cpu"
     if opt == "cpu":  return "cpu"
     return "cuda" if torch.cuda.is_available() else "cpu"
+
+def _model_ctx_len(model, tok):
+    # Prefer model config; tokenizer.model_max_length is often a huge sentinel
+    for k in ("max_position_embeddings", "max_seq_len", "max_sequence_length"):
+        v = getattr(model.config, k, None)
+        if isinstance(v, int) and v > 0:
+            return v
+    # Fallback to something sensible if config lacks it
+    return 8192
 
 def _load_base(name, dtype, attn_impl, hf_token, device, load_in_4bit):
     def _actually_load(attn):
@@ -115,8 +127,21 @@ def main():
     text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     ids = tok(text, return_tensors="pt").to(device)
 
-    # Try to enforce a minimum length via logits processor if available
+    # ----- Length controls -----
+    input_len = ids["input_ids"].shape[-1]
+    # If max_new_tokens omitted → auto up to context window minus prompt (with margin)
+    if args.max_new_tokens is None:
+        ctx = _model_ctx_len(model, tok)
+        auto_max_new = max(32, int(ctx - input_len - 8))
+        max_new_tokens = auto_max_new
+        max_note = "auto"
+    else:
+        max_new_tokens = args.max_new_tokens
+        max_note = "user"
+
+    # Try to enforce a minimum length via logits processor if available; else emulate via min_length
     logits_processor = None
+    min_length = None
     if args.min_new_tokens > 0:
         try:
             from transformers.generation.logits_process import (
@@ -125,20 +150,32 @@ def main():
             eos_for_min = None if args.no_eos else tok.eos_token_id
             logits_processor = LogitsProcessorList([
                 MinNewTokensLengthLogitsProcessor(
-                    prompt_length=ids["input_ids"].shape[-1],
+                    prompt_length=input_len,
                     min_new_tokens=args.min_new_tokens,
                     eos_token_id=eos_for_min,
                 )
             ])
+            print(f"[infer] min_new_tokens via logits_processor={args.min_new_tokens}", file=sys.stderr)
         except Exception:
-            print("[infer] MinNewTokens logits processor not available in this transformers version.",
-                  file=sys.stderr)
+            # Fallback: total min length = input_len + min_new_tokens (clamped to max if necessary)
+            min_length = input_len + args.min_new_tokens
+            if max_new_tokens is not None:
+                min_length = min(min_length, input_len + max_new_tokens)
+            print(f"[infer] MinNewTokens processor missing → using min_length={min_length}", file=sys.stderr)
 
+    # Optionally block common end-of-turn tokens to avoid early stops from chat/tweet priors
+    bad_words_ids = []
+    for t in ("<end_of_turn>", "<eot>", "<|eot_id|>"):
+        tid = tok.convert_tokens_to_ids(t)
+        if isinstance(tid, int) and tid >= 0:
+            bad_words_ids.append([tid])
+
+    # Streamer
     streamer = TextIteratorStreamer(tok, skip_prompt=True, skip_special_tokens=True)
 
     gen_kwargs = dict(
         **ids,
-        max_new_tokens=args.max_new_tokens,
+        max_new_tokens=max_new_tokens,
         do_sample=True,
         temperature=args.temperature,
         top_p=args.top_p,
@@ -149,13 +186,20 @@ def main():
     )
     if logits_processor is not None:
         gen_kwargs["logits_processor"] = logits_processor
+    if min_length is not None:
+        gen_kwargs["min_length"] = min_length
     if args.no_repeat_ngram_size > 0:
         gen_kwargs["no_repeat_ngram_size"] = args.no_repeat_ngram_size
     if args.no_eos:
         gen_kwargs["eos_token_id"] = None  # ensure no EOS stopping
+    if bad_words_ids:
+        gen_kwargs["bad_words_ids"] = bad_words_ids
 
+    print(f"[infer] limits: max_new={max_new_tokens} ({max_note}), min_new={args.min_new_tokens}, no_eos={bool(args.no_eos)}",
+          file=sys.stderr)
     print("[infer] starting generation…", file=sys.stderr)
     t0 = time.time()
+
     def _generate():
         try:
             with torch.inference_mode():
