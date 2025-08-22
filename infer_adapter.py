@@ -27,8 +27,12 @@ def main():
     ids = tok(text, return_tensors="pt").to(model.device)
 
     out = model.generate(
-        **ids, max_new_tokens=args.max_new_tokens,
-        do_sample=True, temperature=args.temperature, top_p=args.top_p
+        **ids,
+        max_new_tokens=args.max_new_tokens,
+        do_sample=True,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        pad_token_id=tok.eos_token_id
     )
     print(tok.decode(out[0], skip_special_tokens=True))
 

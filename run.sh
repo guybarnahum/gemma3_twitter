@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+[[ -n "${TRACE:-}" ]] && set -x
 
 # -------- load .env early --------
 ENV_FILE="${ENV_FILE:-.env}"
@@ -308,12 +309,20 @@ infer_adapter_cmd() {
   [[ -f "infer_adapter.py" ]] || { echo "Missing infer_adapter.py" >&2; exit 1; }
   local VPY; VPY="$(venv_py)" || { echo "No python in venv"; exit 1; }
 
-  local BASE="${1:-${MODEL_NAME:-google/gemma-3-4b-it}}"
-  local ADAPTER="${2:-${ADAPTER_DIR:-out/gemma3-twitter-lora}}"
-  local PROMPT="${3:-}"
-  if [[ -z "${PROMPT}" ]]; then
-    if [ -t 0 ]; then PROMPT="Write a concise tweet in my signature style about: robotics, SLAM, AR."
-    else PROMPT="$(cat)"; fi
+  # If user supplied any args (likely flags like --base/--adapter/--prompt), just pass them through.
+  if [[ "$#" -gt 0 ]]; then
+    "${VPY}" infer_adapter.py "$@"
+    return
+  fi
+
+  # No args → use defaults and optional stdin for prompt.
+  local BASE="${MODEL_NAME:-google/gemma-3-4b-it}"
+  local ADAPTER="${ADAPTER_DIR:-out/gemma3-twitter-lora}"
+  local PROMPT
+  if [ -t 0 ]; then
+    PROMPT="Write a concise tweet in my signature style about: robotics, SLAM, AR."
+  else
+    PROMPT="$(cat)"
   fi
   "${VPY}" infer_adapter.py --base "${BASE}" --adapter "${ADAPTER}" --prompt "${PROMPT}"
 }
@@ -323,9 +332,16 @@ merge_adapter_cmd() {
   [[ -f "merge_adapter.py" ]] || { echo "Missing merge_adapter.py" >&2; exit 1; }
   local VPY; VPY="$(venv_py)" || { echo "No python in venv"; exit 1; }
 
-  local BASE="${1:-${MODEL_NAME:-google/gemma-3-4b-it}}"
-  local ADAPTER="${2:-${ADAPTER_DIR:-out/gemma3-twitter-lora}}"
-  local MERGED="${3:-${MERGED_DIR:-out/gemma3-merged}}"
+  # If flags provided (e.g., --base/--adapter/--out), pass through unchanged.
+  if [[ "$#" -gt 0 ]]; then
+    "${VPY}" merge_adapter.py "$@"
+    return
+  fi
+
+  # Defaults-only path.
+  local BASE="${MODEL_NAME:-google/gemma-3-4b-it}"
+  local ADAPTER="${ADAPTER_DIR:-out/gemma3-twitter-lora}}"
+  local MERGED="${MERGED_DIR:-out/gemma3-merged}"
   mkdir -p "${MERGED}"
   "${VPY}" merge_adapter.py --base "${BASE}" --adapter "${ADAPTER}" --out "${MERGED}"
   echo "Merged model saved to: ${MERGED}"
@@ -336,14 +352,23 @@ infer_merged_cmd() {
   [[ -f "infer_merged.py" ]] || { echo "Missing infer_merged.py" >&2; exit 1; }
   local VPY; VPY="$(venv_py)" || { echo "No python in venv"; exit 1; }
 
-  local MERGED="${1:-${MERGED_DIR:-out/gemma3-merged}}"
-  local PROMPT="${2:-}"
-  if [[ -z "${PROMPT}" ]]; then
-    if [ -t 0 ]; then PROMPT="Write a concise tweet in my signature style about: robotics, SLAM, AR."
-    else PROMPT="$(cat)"; fi
+  # If flags provided (e.g., --model/--prompt/--max_new_tokens), pass through unchanged.
+  if [[ "$#" -gt 0 ]]; then
+    "${VPY}" infer_merged.py "$@"
+    return
+  fi
+
+  # Defaults-only path.
+  local MERGED="${MERGED_DIR:-out/gemma3-merged}"
+  local PROMPT
+  if [ -t 0 ]; then
+    PROMPT="Write a concise tweet in my signature style about: robotics, SLAM, AR."
+  else
+    PROMPT="$(cat)"
   fi
   "${VPY}" infer_merged.py --model "${MERGED}" --prompt "${PROMPT}"
 }
+
 
 clean() {
   rm -rf "${VENV_DIR}"
